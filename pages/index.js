@@ -21,9 +21,8 @@ export default function Home() {
   const localStream = useRef(null);
   const remoteAudio = useRef(null);
   const iceQueue = useRef([]);
-
-  let mediaRecorder = null;
-  let subtitleInterval = null;
+  const mediaRecorder = useRef(null);
+  const subtitleInterval = useRef(null);
 
   useEffect(() => {
     if (!connected) return;
@@ -57,6 +56,13 @@ export default function Home() {
           endCall();
           break;
       }
+    };
+
+    return () => {
+      stopTranscription();
+      ws.current?.close();
+      localStream.current?.getTracks().forEach((t) => t.stop());
+      pc.current?.close();
     };
   }, [connected]);
 
@@ -106,7 +112,7 @@ export default function Home() {
 
     pc.current.onicecandidate = (e) => {
       if (e.candidate) {
-        send({ type: 'ice-candidate', candidate: e.candidate, to: peerName, from: username });
+        send({ type: 'ice-candidate', candidate: e.candidate, to: peer, from: username });
       }
     };
 
@@ -118,27 +124,22 @@ export default function Home() {
       }, 0);
     };
 
-    localStream.current = await navigator.mediaDevices.getUserMedia({ audio: true });
-    localStream.current.getTracks().forEach((t) => pc.current.addTrack(t, localStream.current));
+    try {
+      localStream.current = await navigator.mediaDevices.getUserMedia({ audio: true });
+      localStream.current.getTracks().forEach((t) =>
+        pc.current.addTrack(t, localStream.current)
+      );
+    } catch (err) {
+      alert('Microphone access is required.');
+      console.error(err);
+    }
   };
 
   const flushICEQueue = () => {
-    iceQueue.current.forEach((c) => pc.current.addIceCandidate(c).catch(console.warn));
+    iceQueue.current.forEach((c) =>
+      pc.current.addIceCandidate(c).catch(console.warn)
+    );
     iceQueue.current = [];
-  };
-
-  const playIncomingRingtone = () => document.getElementById('ringtone-incoming')?.play();
-  const stopIncomingRingtone = () => {
-    const audio = document.getElementById('ringtone-incoming');
-    audio.pause();
-    audio.currentTime = 0;
-  };
-
-  const playOutgoingRingtone = () => document.getElementById('ringtone-outgoing')?.play();
-  const stopOutgoingRingtone = () => {
-    const audio = document.getElementById('ringtone-outgoing');
-    audio.pause();
-    audio.currentTime = 0;
   };
 
   const toggleMute = () => {
@@ -150,15 +151,24 @@ export default function Home() {
   };
 
   const startTranscription = () => {
-    const chunks = [];
-    mediaRecorder = new MediaRecorder(localStream.current, { mimeType: 'audio/webm' });
+    if (!MediaRecorder.isTypeSupported('audio/webm')) {
+      alert('Your browser does not support audio/webm');
+      return;
+    }
 
-    mediaRecorder.ondataavailable = (e) => {
+    const chunks = [];
+    mediaRecorder.current = new MediaRecorder(localStream.current, {
+      mimeType: 'audio/webm',
+    });
+
+    mediaRecorder.current.ondataavailable = (e) => {
       if (e.data.size > 0) chunks.push(e.data);
     };
 
-    mediaRecorder.onstop = async () => {
+    mediaRecorder.current.onstop = async () => {
       const blob = new Blob(chunks, { type: 'audio/webm' });
+      chunks.length = 0;
+
       const formData = new FormData();
       formData.append('file', blob, 'clip.wav');
 
@@ -173,18 +183,23 @@ export default function Home() {
         console.error('Transcription failed:', e);
       }
 
-      chunks.length = 0;
-      mediaRecorder.start(); // loop
+      if (mediaRecorder.current?.state === 'inactive') {
+        mediaRecorder.current.start();
+      }
     };
 
-    mediaRecorder.start();
-    subtitleInterval = setInterval(() => mediaRecorder?.stop(), 4000);
+    mediaRecorder.current.start();
+    subtitleInterval.current = setInterval(() => {
+      if (mediaRecorder.current?.state === 'recording') {
+        mediaRecorder.current.stop();
+      }
+    }, 4000);
   };
 
   const stopTranscription = () => {
-    clearInterval(subtitleInterval);
+    clearInterval(subtitleInterval.current);
     try {
-      mediaRecorder?.stop();
+      mediaRecorder.current?.stop();
     } catch {}
   };
 
@@ -213,7 +228,25 @@ export default function Home() {
     setMuted(false);
   };
 
-  const send = (m) => ws.current.send(JSON.stringify(m));
+  const send = (m) => ws.current?.send(JSON.stringify(m));
+
+  const playIncomingRingtone = () =>
+    document.getElementById('ringtone-incoming')?.play();
+
+  const stopIncomingRingtone = () => {
+    const audio = document.getElementById('ringtone-incoming');
+    audio.pause();
+    audio.currentTime = 0;
+  };
+
+  const playOutgoingRingtone = () =>
+    document.getElementById('ringtone-outgoing')?.play();
+
+  const stopOutgoingRingtone = () => {
+    const audio = document.getElementById('ringtone-outgoing');
+    audio.pause();
+    audio.currentTime = 0;
+  };
 
   return (
     <div id="app">
@@ -225,35 +258,55 @@ export default function Home() {
           {!connected ? (
             <>
               <div className="input-group">
-                <input placeholder="Your username" value={username} onChange={(e) => setUsername(e.target.value)} />
+                <input
+                  placeholder="Your username"
+                  value={username}
+                  onChange={(e) => setUsername(e.target.value)}
+                />
               </div>
-              <button className="btn" onClick={connect}>Connect</button>
+              <button className="btn" onClick={connect}>
+                Connect
+              </button>
             </>
           ) : incoming && !inCall ? (
             <div className="modal">
               <div className="modal-content">
-                <p>📞 Incoming call from <strong>{incoming}</strong></p>
+                <p>
+                  📞 Incoming call from <strong>{incoming}</strong>
+                </p>
                 <div className="modal-buttons">
-                  <button className="btn" onClick={() => answerCall(true)}>Accept</button>
-                  <button className="btn" onClick={() => answerCall(false)}>Reject</button>
+                  <button className="btn" onClick={() => answerCall(true)}>
+                    Accept
+                  </button>
+                  <button className="btn" onClick={() => answerCall(false)}>
+                    Reject
+                  </button>
                 </div>
               </div>
             </div>
           ) : inCall ? (
             <div className="call-screen">
               <img src={getAvatar(peerName)} alt="Avatar" />
-              <p><strong>In Call with {peerName}</strong></p>
+              <p>
+                <strong>In Call with {peerName}</strong>
+              </p>
               <p className="subtitle">{subtitle}</p>
               <div className="controls">
-                <button className="control-btn mute" onClick={toggleMute}>{muted ? '🔇' : '🎙️'}</button>
-                <button className="control-btn end" onClick={endCall}>📞</button>
+                <button className="control-btn mute" onClick={toggleMute}>
+                  {muted ? '🔇' : '🎙️'}
+                </button>
+                <button className="control-btn end" onClick={endCall}>
+                  📞
+                </button>
               </div>
             </div>
           ) : calling ? (
             <div className="call-screen">
               <div className="calling-animation" />
               <p>📞 Calling {peerName}...</p>
-              <button className="btn" onClick={endCall}>Cancel</button>
+              <button className="btn" onClick={endCall}>
+                Cancel
+              </button>
             </div>
           ) : (
             <>
@@ -270,7 +323,9 @@ export default function Home() {
                   <span key={u}>{u}</span>
                 ))}
               </div>
-              <button className="btn" onClick={startCall}>Start Call</button>
+              <button className="btn" onClick={startCall}>
+                Start Call
+              </button>
             </>
           )}
           <audio ref={remoteAudio} autoPlay hidden />

@@ -14,12 +14,16 @@ export default function Home() {
   const [calling, setCalling] = useState(false);
   const [incoming, setIncoming] = useState(null);
   const [muted, setMuted] = useState(false);
+  const [subtitle, setSubtitle] = useState('');
 
   const ws = useRef(null);
   const pc = useRef(null);
   const localStream = useRef(null);
   const remoteAudio = useRef(null);
   const iceQueue = useRef([]);
+
+  let mediaRecorder = null;
+  let subtitleInterval = null;
 
   useEffect(() => {
     if (!connected) return;
@@ -64,13 +68,14 @@ export default function Home() {
   };
 
   const startCall = async () => {
-    if (!peerName.trim()) return alert('Enter peer username');
+    if (!peerName.trim()) return alert('Enter name for call');
     setCalling(true);
     playOutgoingRingtone();
     await initPC(peerName);
     const offer = await pc.current.createOffer();
     await pc.current.setLocalDescription(offer);
     send({ type: 'offer', offer, to: peerName, from: username });
+    startTranscription();
   };
 
   const answerCall = async (accept) => {
@@ -90,6 +95,7 @@ export default function Home() {
     await pc.current.setLocalDescription(answer);
     send({ type: 'answer', answer, to: from, from: username });
     setInCall(true);
+    startTranscription();
   };
 
   const initPC = async (peer) => {
@@ -143,9 +149,50 @@ export default function Home() {
     }
   };
 
+  const startTranscription = () => {
+    const chunks = [];
+    mediaRecorder = new MediaRecorder(localStream.current, { mimeType: 'audio/webm' });
+
+    mediaRecorder.ondataavailable = (e) => {
+      if (e.data.size > 0) chunks.push(e.data);
+    };
+
+    mediaRecorder.onstop = async () => {
+      const blob = new Blob(chunks, { type: 'audio/webm' });
+      const formData = new FormData();
+      formData.append('file', blob, 'clip.wav');
+
+      try {
+        const res = await fetch('https://server-olzm.onrender.com/transcribe', {
+          method: 'POST',
+          body: formData,
+        });
+        const json = await res.json();
+        setSubtitle(json.text);
+      } catch (e) {
+        console.error('Transcription failed:', e);
+      }
+
+      chunks.length = 0;
+      mediaRecorder.start(); // loop
+    };
+
+    mediaRecorder.start();
+    subtitleInterval = setInterval(() => mediaRecorder?.stop(), 4000);
+  };
+
+  const stopTranscription = () => {
+    clearInterval(subtitleInterval);
+    try {
+      mediaRecorder?.stop();
+    } catch {}
+  };
+
   const endCall = () => {
     stopIncomingRingtone();
     stopOutgoingRingtone();
+    stopTranscription();
+    setSubtitle('');
     send({ type: 'end_call', to: peerName, from: username });
     localStream.current?.getTracks().forEach((t) => t.stop());
     pc.current?.close();
@@ -156,6 +203,8 @@ export default function Home() {
   };
 
   const resetAll = () => {
+    stopTranscription();
+    setSubtitle('');
     setConnected(false);
     setInCall(false);
     setCalling(false);
@@ -176,11 +225,7 @@ export default function Home() {
           {!connected ? (
             <>
               <div className="input-group">
-                <input
-                  placeholder="Your username"
-                  value={username}
-                  onChange={(e) => setUsername(e.target.value)}
-                />
+                <input placeholder="Your username" value={username} onChange={(e) => setUsername(e.target.value)} />
               </div>
               <button className="btn" onClick={connect}>Connect</button>
             </>
@@ -198,6 +243,7 @@ export default function Home() {
             <div className="call-screen">
               <img src={getAvatar(peerName)} alt="Avatar" />
               <p><strong>In Call with {peerName}</strong></p>
+              <p className="subtitle">{subtitle}</p>
               <div className="controls">
                 <button className="control-btn mute" onClick={toggleMute}>{muted ? '🔇' : '🎙️'}</button>
                 <button className="control-btn end" onClick={endCall}>📞</button>
